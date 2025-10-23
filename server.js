@@ -1,13 +1,19 @@
-// server.js — Express API that calls your proven Fitpass automation
+// server.js — robust API wrapper around your proven Fitpass flow
 import express from "express";
 import puppeteer from "puppeteer";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/", (_req, res) => res.send("✅ Fitpass automation online (using proven flow)"));
+// Basic request logging (helps a ton on Railway)
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.url} body=`, JSON.stringify(req.body || {}));
+  next();
+});
 
-// ---- Helpers from your script (kept as-is conceptually) ----
+app.get("/", (_req, res) => res.send("✅ Fitpass automation online (proven flow + watchdog)"));
+
+// ===== Helpers copied from your working script (unchanged in spirit)
 const TIMEOUT = 5000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const normalizeTimeTokens = (txt) =>
@@ -33,8 +39,16 @@ function extractStartTimeMinutes(txt) {
   return toMinutes(`${hh}:${mm}${ap ? " " + ap : ""}`);
 }
 
-// ======= functions adapted from your file (selectors preserved) =======
-async function gotoDate(page, isoDate, DEBUG=false) { // :contentReference[oaicite:1]{index=1}
+// Step logger wrapper (so logs show where things fail)
+const step = async (label, fn) => {
+  console.log("➡️ ", label);
+  const t = Date.now();
+  try { const r = await fn(); console.log("✅", label, `${Date.now()-t}ms`); return r; }
+  catch (e) { console.error("❌", label, e?.message || e); throw e; }
+};
+
+// === Functions adapted from your index.js (selectors preserved) ===
+async function gotoDate(page, isoDate, DEBUG=false) { /* same as your code */ 
   const dlog = (...a)=>DEBUG&&console.log("[DEBUG]",...a);
   dlog("📅 gotoDate →", isoDate);
   const dateInputs = ['input[type="date"]','input[name="date"]','input[aria-label*="fecha" i]','input[placeholder*="fecha" i]'];
@@ -79,7 +93,7 @@ async function gotoDate(page, isoDate, DEBUG=false) { // :contentReference[oaici
   throw new Error(`Could not navigate calendar to ${isoDate}.`);
 }
 
-async function closeModalIfOpen(page, DEBUG=false) { // :contentReference[oaicite:2]{index=2}
+async function closeModalIfOpen(page, DEBUG=false) {
   const dlog = (...a)=>DEBUG&&console.log("[DEBUG]",...a);
   const safeCloseSelectors=[
     '#schedule_modal_container button.close',
@@ -100,7 +114,7 @@ async function closeModalIfOpen(page, DEBUG=false) { // :contentReference[oaicit
   dlog("  Closing modal via Escape (safe method)"); await page.keyboard.press("Escape").catch(()=>{}); await sleep(200);
 }
 
-async function modalMatchesTarget(page, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG=false) { // :contentReference[oaicite:3]{index=3}
+async function modalMatchesTarget(page, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG=false) {
   const dlog = (...a)=>DEBUG&&console.log("[DEBUG]",...a);
   await page.waitForSelector("#schedule_modal_container, .modal", { visible: true, timeout: TIMEOUT });
   await sleep(500);
@@ -118,7 +132,7 @@ async function modalMatchesTarget(page, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE
   return STRICT_REQUIRE_NAME ? (timeOK && nameOK) : (timeOK && nameOK);
 }
 
-async function formMatchesTarget(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG=false) { // :contentReference[oaicite:4]{index=4}
+async function formMatchesTarget(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG=false) {
   const dlog = (...a)=>DEBUG&&console.log("[DEBUG]",...a);
   const selectorCandidates=['[id^="schedule_form_"]','form[action*="schedules"]','#schedule_modal_container form','.modal form','form'];
   let raw=""; for(const sel of selectorCandidates){ const el=await page.$(sel); if(el){ raw=await page.evaluate(n=>n.innerText||"",el); if(raw)break; } }
@@ -129,11 +143,11 @@ async function formMatchesTarget(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, ST
   const nameOK=TARGET_NAME?txt.toLowerCase().includes(TARGET_NAME.toLowerCase()):true;
   const pageTxt=normalizeTimeTokens(await page.evaluate(()=>document.body.innerText||""));
   const dateOK=pageTxt.includes(TARGET_DATE);
-  dlog("  [Form check] timeOK:",timeOK,"nameOK:",nameOK,"dateOK:",dateOK);
+  console.log("  [Form check] timeOK:",timeOK,"nameOK:",nameOK,"dateOK:",dateOK);
   return (STRICT_REQUIRE_NAME ? (timeOK && nameOK) : (timeOK && nameOK)) && dateOK;
 }
 
-async function openCorrectEvent(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG=false) { // :contentReference[oaicite:5]{index=5}
+async function openCorrectEvent(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG=false) {
   const dlog = (...a)=>DEBUG&&console.log("[DEBUG]",...a);
   await page.waitForSelector(".fc-event, .fc-daygrid-event, .fc-timegrid-event", { visible: true, timeout: TIMEOUT });
   const events = await page.$$(".fc-timegrid-event, .fc-daygrid-event, .fc-event, a.fc-event, a.fc-daygrid-event");
@@ -161,30 +175,25 @@ async function openCorrectEvent(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STR
   }).sort((a,b)=>b.score-a.score);
   const best = scored[0]; if(!best) return false;
 
-  // scroll + click (with fallbacks) :contentReference[oaicite:6]{index=6}
   await best.ev.evaluate(n=>n.scrollIntoView({block:"center",behavior:"instant"}));
   try { await best.ev.click(); } catch {}
   try { await page.evaluate(el=>el.dispatchEvent(new MouseEvent('click',{view:window,bubbles:true,cancelable:true})), best.ev);} catch {}
   await sleep(100);
 
-  // Gate 1: modal matches
   const okModal = await modalMatchesTarget(page, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG);
   if (!okModal) { await closeModalIfOpen(page, DEBUG); await sleep(200); return false; }
 
-  // Proceed to "EDITAR CLASE" (anchor .btn-primary inside modal) :contentReference[oaicite:7]{index=7}
   await page.waitForSelector("#schedule_modal_container a.btn-primary, .modal a.btn-primary", { visible: true, timeout: TIMEOUT });
   await Promise.all([
     page.waitForNavigation({ waitUntil: "networkidle0", timeout: 15000 }).catch(()=>{}),
     page.click("#schedule_modal_container a.btn-primary, .modal a.btn-primary"),
   ]);
 
-  // Gate 2: edit form must match target
   return await formMatchesTarget(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG);
 }
 
-// ======= main runner (parametrized) based on your run() =======
-async function runFitpass({ email, password, TARGET_DATE, TARGET_TIME, TARGET_NAME="", NEW_CAPACITY, STRICT_REQUIRE_NAME=true, DEBUG=false }) { // :contentReference[oaicite:8]{index=8}
-  const dlog = (...a)=>DEBUG&&console.log("[DEBUG]",...a);
+// === Main run (exactly your flow, plus robust login submit)
+async function runFitpass({ email, password, TARGET_DATE, TARGET_TIME, TARGET_NAME="", NEW_CAPACITY, STRICT_REQUIRE_NAME=true, DEBUG=false }) {
   const browser = await puppeteer.launch({
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
@@ -196,55 +205,69 @@ async function runFitpass({ email, password, TARGET_DATE, TARGET_TIME, TARGET_NA
   page.setDefaultTimeout(TIMEOUT);
 
   try {
-    // 1) Login (your exact selectors) :contentReference[oaicite:9]{index=9}
-    await page.goto("https://admin2.fitpass.com/sessions/new", { waitUntil: "domcontentloaded" });
-    await page.waitForSelector("#login_user_email", { visible: true });
-    await page.type("#login_user_email", email, { delay: 25 });
-    await page.click("#login_user_password");
-    await page.type("#login_user_password", password, { delay: 25 });
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: "networkidle0", timeout: 15000 }),
-      page.click("#new_login_user button"),
-    ]);
+    await step("Open login", () => page.goto("https://admin2.fitpass.com/sessions/new", { waitUntil: "domcontentloaded" }));
+    await step("Fill credentials", async () => {
+      await page.waitForSelector("#login_user_email", { visible: true });
+      await page.type("#login_user_email", email, { delay: 25 });
+      await page.click("#login_user_password");
+      await page.type("#login_user_password", password, { delay: 25 });
+    });
+    await step("Submit login", async () => {
+      // Click button; if not found or click ignored, press Enter as fallback
+      const btn = await page.$("#new_login_user button");
+      if (btn) {
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: "networkidle0", timeout: 15000 }).catch(()=>{}),
+          btn.click(),
+        ]);
+      } else {
+        await page.keyboard.press("Enter");
+        await page.waitForNavigation({ waitUntil: "networkidle0", timeout: 15000 }).catch(()=>{});
+      }
+    });
 
-    // 2) Calendar nav (as in your script) :contentReference[oaicite:10]{index=10}
-    try {
-      await page.waitForSelector('#sidebar a[href*="calendar"]', { timeout: 3000 });
-      await page.click('#sidebar a[href*="calendar"]');
-    } catch {
-      await page.click("#sidebar a:nth-of-type(3)");
-    }
-    await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(()=>{});
+    await step("Open calendar", async () => {
+      try {
+        await page.waitForSelector('#sidebar a[href*="calendar"]', { timeout: 3000 });
+        await page.click('#sidebar a[href*="calendar"]');
+      } catch {
+        await page.click("#sidebar a:nth-of-type(3)");
+      }
+      await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(()=>{});
+    });
 
-    // 3) Date
-    await gotoDate(page, TARGET_DATE, DEBUG);
+    await step(`Goto date ${TARGET_DATE}`, () => gotoDate(page, TARGET_DATE, DEBUG));
 
-    // 4) Open correct event (strict)
-    const opened = await openCorrectEvent(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG);
-    if (!opened) throw new Error(`No matching event for ${TARGET_DATE} at "${TARGET_TIME}"${TARGET_NAME ? ` with "${TARGET_NAME}"` : ""}.`);
+    await step("Open matching event", async () => {
+      const opened = await openCorrectEvent(page, TARGET_DATE, TARGET_TIME, TARGET_NAME, STRICT_REQUIRE_NAME, DEBUG);
+      if (!opened) throw new Error(`No matching event for ${TARGET_DATE} at "${TARGET_TIME}"${TARGET_NAME ? ` with "${TARGET_NAME}"` : ""}.`);
+    });
 
-    // 5) Set capacity (same selectors) :contentReference[oaicite:11]{index=11}
-    await page.waitForSelector("#schedule_lesson_availability", { visible: true, timeout: TIMEOUT });
-    await page.click("#schedule_lesson_availability", { clickCount: 3 });
-    await page.type("#schedule_lesson_availability", String(NEW_CAPACITY), { delay: 20 });
+    await step("Set capacity", async () => {
+      await page.waitForSelector("#schedule_lesson_availability", { visible: true, timeout: TIMEOUT });
+      await page.click("#schedule_lesson_availability", { clickCount: 3 });
+      await page.type("#schedule_lesson_availability", String(NEW_CAPACITY), { delay: 20 });
+    });
 
-    // 6) Save
-    await page.waitForSelector('footer button[type="submit"], footer > div:nth-of-type(1) button', { visible: true, timeout: TIMEOUT });
-    await Promise.all([
-      page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(()=>{}),
-      page.click('footer button[type="submit"], footer > div:nth-of-type(1) button'),
-    ]);
-
-    // 7) “Editar solo esta clase”
-    const buttons = await page.$$("div.text-start button");
-    if (buttons.length) {
+    await step("Save", async () => {
+      await page.waitForSelector('footer button[type="submit"], footer > div:nth-of-type(1) button', { visible: true, timeout: TIMEOUT });
       await Promise.all([
         page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(()=>{}),
-        buttons[0].click(),
+        page.click('footer button[type="submit"], footer > div:nth-of-type(1) button'),
       ]);
-    } else {
-      throw new Error('Could not find "EDITAR SOLO ESTA CLASE" button.');
-    }
+    });
+
+    await step('Confirm "Editar solo esta clase"', async () => {
+      const buttons = await page.$$("div.text-start button");
+      if (buttons.length) {
+        await Promise.all([
+          page.waitForNetworkIdle({ idleTime: 800, timeout: 15000 }).catch(()=>{}),
+          buttons[0].click(),
+        ]);
+      } else {
+        throw new Error('Could not find "EDITAR SOLO ESTA CLASE" button.');
+      }
+    });
 
     await page.close().catch(()=>{});
     await browser.close().catch(()=>{});
@@ -256,12 +279,21 @@ async function runFitpass({ email, password, TARGET_DATE, TARGET_TIME, TARGET_NA
   }
 }
 
-// ---- API: POST /run ----
+// --- API: POST /run with a 55s watchdog (prevents proxy resets)
 app.post("/run", async (req, res) => {
   const { email, password, targetDate, targetTime, targetName="", newCapacity, strictRequireName=true, debug=false } = req.body || {};
   if (!email || !password || !targetDate || !targetTime || newCapacity==null) {
     return res.status(400).json({ ok:false, error:"Missing required fields: email, password, targetDate, targetTime, newCapacity" });
   }
+
+  let replied = false;
+  const watchdog = setTimeout(() => {
+    if (!replied) {
+      replied = true;
+      res.status(202).json({ ok:false, pending:true, message:"Still running; check Railway logs for live steps." });
+    }
+  }, 55000); // ~55s < proxy timeout
+
   const result = await runFitpass({
     email,
     password,
@@ -272,11 +304,16 @@ app.post("/run", async (req, res) => {
     STRICT_REQUIRE_NAME: !!strictRequireName,
     DEBUG: !!debug,
   });
-  if (result.ok) return res.json(result);
-  return res.status(500).json(result);
+
+  if (!replied) {
+    clearTimeout(watchdog);
+    replied = true;
+    if (result.ok) return res.json(result);
+    return res.status(500).json(result);
+  }
 });
 
-// guards
+// Crash guards
 process.on("unhandledRejection", e => console.error("unhandledRejection:", e));
 process.on("uncaughtException", e => console.error("uncaughtException:", e));
 
