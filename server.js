@@ -93,6 +93,60 @@ async function gotoDate(page, isoDate, DEBUG=false) { /* same as your code */
   throw new Error(`Could not navigate calendar to ${isoDate}.`);
 }
 
+async function gotoCalendar(page, { DEBUG=false } = {}) {
+  const dbg = (...a)=>DEBUG&&console.log("[DEBUG]", ...a);
+
+  // 1) direct link tries
+  const candidates = [
+    'a[href*="/calendar"]',
+    'nav a[href*="calendar"]',
+    '#sidebar a[href*="calendar"]',
+    'a[href*="/schedules"]',
+    'a[href*="agenda"]',
+    'a[href*="horario"]',
+  ];
+  for (const sel of candidates) {
+    const el = await page.$(sel);
+    if (el) {
+      dbg("Clicking", sel);
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: "networkidle0", timeout: 15000 }).catch(()=>{}),
+        el.click()
+      ]);
+      const onCal = await page.$('.fc, .fc-view, .fc-timegrid, .fc-daygrid');
+      if (onCal) return true;
+    }
+  }
+
+  // 2) search by visible text
+  const clickedByText = await page.evaluate(() => {
+    const kws = ["calendar","calendario","agenda","horario","schedule"];
+    const els = Array.from(document.querySelectorAll('a, button, [role="button"], [role="menuitem"] a'));
+    for (const a of els) {
+      const t = (a.innerText || a.textContent || "").toLowerCase();
+      if (kws.some(k => t.includes(k))) { a.click(); return true; }
+    }
+    return false;
+  });
+  if (clickedByText) {
+    await page.waitForNavigation({ waitUntil: "networkidle0", timeout: 15000 }).catch(()=>{});
+    const onCal = await page.$('.fc, .fc-view, .fc-timegrid, .fc-daygrid');
+    if (onCal) return true;
+  }
+
+  // 3) last resort: navigate directly (session is already authenticated)
+  const base = await page.evaluate(() => location.origin);
+  for (const path of ["/calendar", "/schedules", "/agenda"]) {
+    try {
+      await page.goto(base + path, { waitUntil: "networkidle0", timeout: 15000 });
+      const onCal = await page.$('.fc, .fc-view, .fc-timegrid, .fc-daygrid');
+      if (onCal) return true;
+    } catch {}
+  }
+
+  throw new Error("Could not navigate to calendar; menu/link not found.");
+}
+
 async function closeModalIfOpen(page, DEBUG=false) {
   const dlog = (...a)=>DEBUG&&console.log("[DEBUG]",...a);
   const safeCloseSelectors=[
@@ -227,13 +281,7 @@ async function runFitpass({ email, password, TARGET_DATE, TARGET_TIME, TARGET_NA
     });
 
     await step("Open calendar", async () => {
-      try {
-        await page.waitForSelector('#sidebar a[href*="calendar"]', { timeout: 3000 });
-        await page.click('#sidebar a[href*="calendar"]');
-      } catch {
-        await page.click("#sidebar a:nth-of-type(3)");
-      }
-      await page.waitForNetworkIdle({ idleTime: 500, timeout: 15000 }).catch(()=>{});
+      await gotoCalendar(page, { DEBUG });
     });
 
     await step(`Goto date ${TARGET_DATE}`, () => gotoDate(page, TARGET_DATE, DEBUG));
