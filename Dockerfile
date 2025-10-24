@@ -25,13 +25,27 @@ RUN apt-get update && apt-get install -y \
     wget \
   && rm -rf /var/lib/apt/lists/*
 
-# Use system Chromium (don’t download Chrome)
+# Use system Chromium (don't download Chrome)
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
+# Railway-specific environment
+ENV NODE_ENV=production
+ENV PORT=3000
+
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev || npm i --omit=dev
+
+# Copy package files first for better caching
+COPY package.json package-lock.json ./
+
+# Install dependencies (Railway prefers npm ci)
+RUN npm ci --only=production
+
+# Copy source code
 COPY . .
 
-CMD ["npm", "start"]
+# Expose port
+EXPOSE 3000
+
+# Start the application
+CMD ["node", "server.js"]
